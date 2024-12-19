@@ -1,0 +1,10 @@
+<configuration name="opusfile.conf">
+    <settings>
+        <!-- bitrate is in kbps, so an entry of 96 is 96 kbps -->
+        <param name="bitrate" value="96"/>
+        <param name="complexity" value="5"/>
+	<!-- metadata is some info you may want tagged in the ogg file.  It can be any string up to 127 chars long. -->
+	<param name="metadata" value="FreeSWITCH/mod_opusfile"/>
+    </settings>
+</configuration>
+

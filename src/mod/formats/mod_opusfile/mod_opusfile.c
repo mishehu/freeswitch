@@ -148,6 +148,9 @@ typedef struct opus_stream_context opus_stream_context_t;
 
 static struct {
 	int debug;
+	opus_int32 bitrate;
+	int complexity;
+	char metadata[128];
 } globals;
 
 static switch_status_t switch_opusfile_decode(opus_file_context *context, void *data, size_t max_bytes, int channels)
@@ -274,7 +277,7 @@ static switch_status_t switch_opusfile_open(switch_file_handle_t *handle, const 
 		context->samplerate = handle->samplerate;
 		handle->seekable = 0;
 		context->comments = ope_comments_create();
-		ope_comments_add(context->comments, "METADATA", "Freeswitch/mod_opusfile");
+		ope_comments_add(context->comments, "METADATA", globals.metadata);
 		// opus_multistream_surround_encoder_get_size() in libopus will check these
 		if ((context->channels > 2) && (context->channels <= 8)) {
 			mapping_family = 1;
@@ -287,6 +290,18 @@ static switch_status_t switch_opusfile_open(switch_file_handle_t *handle, const 
 			switch_thread_rwlock_unlock(context->rwlock);
 			return SWITCH_STATUS_FALSE;
 		}
+		
+		// Let's set the bitrate and complexity, shall we?
+		err = ope_encoder_ctl(context->enc, OPUS_SET_BITRATE_REQUEST, globals.bitrate);
+		if(err != OPE_OK) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to properly set the bitrate.  err: [%d] [%s]\n", err, ope_strerror(err));
+		}
+		
+		err = ope_encoder_ctl(context->enc, OPUS_SET_COMPLEXITY_REQUEST, globals.complexity);
+		if(err != OPE_OK) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to properly set the complexity.  err: [%d] [%s]\n", err, ope_strerror(err));
+		}
+		
 		switch_thread_rwlock_unlock(context->rwlock);
 		return SWITCH_STATUS_SUCCESS;
 	}
@@ -478,7 +493,7 @@ static switch_status_t switch_opusfile_write(switch_file_handle_t *handle, void 
 	}
 	if (!context->comments) {
 		context->comments = ope_comments_create();
-		ope_comments_add(context->comments, "METADATA", "Freeswitch/mod_opusfile");
+		ope_comments_add(context->comments, "METADATA", globals.metadata);
 	}
 	if (context->channels > 2) {
 			mapping_family = 1;
@@ -488,6 +503,17 @@ static switch_status_t switch_opusfile_write(switch_file_handle_t *handle, void 
 		if (!context->enc) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Can't open file for writing. err: [%d] [%s]\n", err, ope_strerror(err));
 			return SWITCH_STATUS_FALSE;
+		}
+		
+		// Let's set the bitrate and complexity, shall we?
+		err = ope_encoder_ctl(context->enc, OPUS_SET_BITRATE_REQUEST, globals.bitrate);
+		if(err != OPE_OK) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to properly set the bitrate.  err: [%d] [%s]\n", err, ope_strerror(err));
+		}
+		
+		err = ope_encoder_ctl(context->enc, OPUS_SET_COMPLEXITY_REQUEST, globals.complexity);
+		if(err != OPE_OK) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to properly set the complexity.  err: [%d] [%s]\n", err, ope_strerror(err));
 		}
 	}
 
@@ -756,7 +782,7 @@ static switch_status_t switch_opusstream_init(switch_codec_t *codec, switch_code
 		if (encoding) {
 			if (!context->comments) {
 				context->comments = ope_comments_create();
-				ope_comments_add(context->comments, "METADATA", "Freeswitch/mod_opusfile");
+				ope_comments_add(context->comments, "METADATA", "Freeswitch/mod_opusfile modified by Yossi 2024-12-18 (instance 2)");
 			}
 			if (!context->enc) {
 				int mapping_family = 0;
@@ -776,8 +802,21 @@ static switch_status_t switch_opusstream_init(switch_codec_t *codec, switch_code
 				} else {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "[OGG/OPUS Stream Encode] Stream opened for encoding\n"); 
 				}
-				ope_encoder_ctl(context->enc, OPUS_SET_COMPLEXITY_REQUEST, 5);
+				// ope_encoder_ctl(context->enc, OPUS_SET_COMPLEXITY_REQUEST, 5);
 				ope_encoder_ctl(context->enc, OPUS_SET_APPLICATION_REQUEST, OPUS_APPLICATION_VOIP);
+				
+				// Let's set the bitrate and complexity, shall we?
+				// err = ope_encoder_ctl(context->enc, OPUS_SET_BITRATE(globals.bitrate));
+				err = ope_encoder_ctl(context->enc, OPUS_SET_BITRATE_REQUEST, globals.bitrate);
+				if(err != OPE_OK) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to properly set the bitrate.  err: [%d] [%s]\n", err, ope_strerror(err));
+				}
+				
+				// err = ope_encoder_ctl(context->enc, OPUS_SET_COMPLEXITY(globals.complexity));
+				err = ope_encoder_ctl(context->enc, OPUS_SET_COMPLEXITY_REQUEST, globals.complexity);
+				if(err != OPE_OK) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unable to properly set the complexity.  err: [%d] [%s]\n", err, ope_strerror(err));
+				}
 			}
 		}
 #endif 
@@ -1141,12 +1180,64 @@ end:
 	return status;
 }
 
+/* Load config */
+static switch_status_t opusfile_load_config(switch_bool_t reload)
+{
+	char *cf = "opusfile.conf";
+	switch_xml_t cfg, xml = NULL, param, settings;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+
+	if (!(xml = switch_xml_open_cfg(cf, &cfg, NULL))) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Opening of %s failed\n", cf);
+		return SWITCH_STATUS_FALSE;;
+	}
+
+	/* Set sane defaults */
+	memset(globals.metadata, 0, 128);
+	globals.bitrate = 96000;
+	globals.complexity = 10;
+	
+	if ((settings = switch_xml_child(cfg, "settings"))) {
+		for (param = switch_xml_child(settings, "param"); param; param = param->next) {
+			char *key = (char *) switch_xml_attr_soft(param, "name");
+			char *val = (char *) switch_xml_attr_soft(param, "value");
+
+			if (!strcasecmp(key, "bitrate") && !zstr(val)) {
+				int temp_bitrate = atoi(val);
+				if(temp_bitrate >= 6 && temp_bitrate <= 255) {
+					globals.bitrate = (opus_int32) temp_bitrate * 1000;
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Bitrate for opusfile set to %d kbps.\n", temp_bitrate);
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "The bitrate must be between 6 and 255 kbps.  You set %d kbps.  Forcing 96 kbps.\n", temp_bitrate);
+				}
+			} else if (!strcasecmp(key, "complexity")) {
+				int temp_complexity = atoi(val);
+				if(temp_complexity >= 0 && temp_complexity < 11) {
+					globals.complexity = temp_complexity;
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Complexity for opusfile set to %d.\n", temp_complexity);
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "opusfile complexity must be between 0-10, you set %d which is out of range.  Setting value to 10.\n", temp_complexity);
+				}
+			} else if (!strcasecmp(key, "metadata")) {
+				strncpy(globals.metadata, val, 127);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Setting the METADATA tag on recorded files to %s\n", globals.metadata);
+			}
+		}
+	}
+
+	switch_xml_free(xml);
+
+	return status;
+}
+
+
 /* Registration */
 
 static char *supported_formats[SWITCH_MAX_CODECS] = { 0 };
 
 SWITCH_MODULE_LOAD_FUNCTION(mod_opusfile_load)
 {
+	switch_status_t status;
 	switch_file_interface_t *file_interface;
 	switch_api_interface_t *commands_api_interface;
 	switch_codec_interface_t *codec_interface;
@@ -1154,6 +1245,10 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_opusfile_load)
 	int RATES[] = {8000, 16000, 24000, 48000};
 	int i;
 
+	if ((status = opusfile_load_config(SWITCH_FALSE)) != SWITCH_STATUS_SUCCESS) {
+		return status;
+	}
+	
 	supported_formats[0] = "opus";
 
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
